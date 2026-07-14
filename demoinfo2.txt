@@ -59,7 +59,8 @@
 		{ m_Name = "RagdollBlendDirection"					m_VarType = "NET_DATA_TYPE_INT64" },	// int32  ?
 		{ m_Name = "BeamType_t"								m_VarType = "NET_DATA_TYPE_INT64" },	// int32  ?
 		{ m_Name = "BeamClipStyle_t"						m_VarType = "NET_DATA_TYPE_UINT64" },	// uint32  ?
-		{ m_Name = "EntityDisolveType_t"					m_VarType = "NET_DATA_TYPE_INT64" },	// int32  ?
+		{ m_Name = "EntityDisolveType_t"					m_VarType = "NET_DATA_TYPE_INT64" },	// int32  ? (Valve's original typo, kept for old demos)
+		{ m_Name = "EntityDissolveType_t"					m_VarType = "NET_DATA_TYPE_INT64" },	// int32  ? (spelling fixed in-game; enum has -1 so must be signed)
 
 		{ m_Name = "ValueRemapperInputType_t"				m_VarType = "NET_DATA_TYPE_UINT64" },	// uint32  ?
 		{ m_Name = "ValueRemapperOutputType_t"				m_VarType = "NET_DATA_TYPE_UINT64" },	// uint32  ?
