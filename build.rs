@@ -7,7 +7,23 @@ use std::{
 use kv3::Value;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // force rebuild if GameTracking-CS2 is updated
+    fn emit_proto_rerun_directives(path: &Path) -> Result<(), std::io::Error> {
+        for entry in std::fs::read_dir(path)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                emit_proto_rerun_directives(&path)?;
+            } else if path.extension().is_some_and(|extension| extension == "proto") {
+                println!("cargo:rerun-if-changed={}", path.display());
+            }
+        }
+
+        Ok(())
+    }
+
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let protobuf_dir = Path::new(&manifest_dir).join("GameTracking-CS2/Protobufs");
+    emit_proto_rerun_directives(&protobuf_dir)?;
 
     prost_build::Config::new()
         .bytes(["."])

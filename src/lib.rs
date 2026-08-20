@@ -3,13 +3,14 @@ pub mod entity;
 pub mod event;
 pub mod game_event;
 pub mod string_table;
+pub mod usercmd;
 
 pub mod protobuf {
     include!(concat!(env!("OUT_DIR"), "/game_messages.rs"));
 }
 
 use foldhash::{HashMap, HashMapExt};
-use log::warn;
+use log::{debug, warn};
 use std::any::Any;
 use std::io::Cursor;
 use std::sync::Arc;
@@ -49,6 +50,9 @@ pub struct CsDemoParser<T: std::io::BufRead + Send + Sync> {
 
     game_event_serializers: HashMap<&'static str, GameEventSerializerFactory>,
     game_event_list: HashMap<i32, Box<dyn GameEventSerializer>>,
+
+    usercmd_reconstructor: usercmd::UserCmdReconstructor,
+    usercmd_diagnostics: usercmd::UserCmdDiagnostics,
 
     string_tables: Vec<String>,
     instance_baseline: Option<StringTable<BaselineStringTableParser, Box<dyn Any + Send + Sync>>>,
@@ -124,6 +128,8 @@ impl<T: std::io::BufRead + Send + Sync> CsDemoParser<T> {
             entity_serializers: HashMap::new(),
             game_event_serializers,
             game_event_list: HashMap::new(),
+            usercmd_reconstructor: usercmd::UserCmdReconstructor::default(),
+            usercmd_diagnostics: usercmd::UserCmdDiagnostics::default(),
             string_tables: Vec::with_capacity(16),
             instance_baseline: None,
             field_path_cache: Vec::with_capacity(256),
@@ -175,6 +181,12 @@ impl<T: std::io::BufRead + Send + Sync> CsDemoParser<T> {
 
     pub fn notify_listeners<E: Event>(&mut self, event: E) -> Result<(), std::io::Error> {
         self.event_manager.notify_listeners(event, &self.state)
+    }
+
+    /// Returns user-command reconstruction failures observed while parsing.
+    #[must_use]
+    pub fn usercmd_diagnostics(&self) -> usercmd::UserCmdDiagnostics {
+        self.usercmd_diagnostics
     }
 
     /// checks if the parser is fresh, i.e. has not parsed any frames yet
@@ -308,6 +320,16 @@ impl<T: std::io::BufRead + Send + Sync> CsDemoParser<T> {
                 buf
             };
 
+
+            let wants_usercmd = message_type == SvcMessages::SvcUserCmds as u32 && self.event_manager.has_listeners::<usercmd::UserCommandsEvent>();
+            if wants_usercmd {
+                #[cfg(not(feature = "handle_packet"))]
+                let buf = self.read_slice_from_demo_packet(&data, &mut r, size)?;
+
+                self.handle_user_commands(buf, false)?;
+                continue;
+            }
+
             macro_rules! handle_message {
                 ($(($mt:expr, $handler:ident)),*) => {
                     $(
@@ -353,20 +375,57 @@ impl<T: std::io::BufRead + Send + Sync> CsDemoParser<T> {
         Ok(())
     }
 
-    // fn handle_demo_full_packet(
-    //     &mut self,
-    //     msg: protobuf::CDemoFullPacket,
-    // ) -> Result<(), std::io::Error> {
-    //     if let Some(string_tables) = msg.string_table {
-    //         self.handle_demo_string_tables(string_tables)?;
-    //     }
+    fn handle_user_commands(&mut self, buf: Bytes, is_checkpoint: bool) -> Result<(), std::io::Error> {
+        let packet = self.parse_demo_message::<protobuf::CsvcMsgUserCommands>(buf, false)?;
+        let mut commands = Vec::with_capacity(packet.commands.len());
 
-    //     if let Some(packet) = msg.packet {
-    //         self.handle_demo_packet(packet)?;
-    //     }
+        for command in &packet.commands {
+            match self.usercmd_reconstructor.reconstruct(command) {
+                Ok(command) if !is_checkpoint => commands.push(command),
+                Ok(_) => {}
+                Err(error) if error.is_missing_baseline() => debug!("[tick {}] usercmd has no baseline: {error}", self.state.tick),
+                Err(error @ usercmd::UserCmdReconstructionError::StaleCommand { .. }) if is_checkpoint => debug!("[tick {}] ignored stale full-packet usercmd: {error}", self.state.tick),
+                Err(error) => {
+                    if matches!(error, usercmd::UserCmdReconstructionError::InvalidDelta { .. }) {
+                        self.usercmd_diagnostics.invalid_delta_count += 1;
+                    }
+                    warn!("[tick {}] can't reconstruct usercmd: {error}", self.state.tick);
+                }
+            }
+        }
 
-    //     Ok(())
-    // }
+        if !commands.is_empty() {
+            self.notify_listeners(usercmd::UserCommandsEvent { commands })?;
+        }
+
+        Ok(())
+    }
+
+    fn handle_demo_full_packet(&mut self, msg: protobuf::CDemoFullPacket) -> Result<(), std::io::Error> {
+        let Some(data) = msg.packet.and_then(|packet| packet.data) else { return Ok(()); };
+
+        let total_bits = (data.len() << 3) as u64;
+        let mut r = BitReader::endian(Cursor::new(&data), bitstream_io::LittleEndian);
+
+        while total_bits.saturating_sub(r.position_in_bits()?) >= 8 {
+            let message_type = r.read_ubit_int()?;
+            let size = r.read_varint_u64()? as usize;
+            let remaining_bits = total_bits.saturating_sub(r.position_in_bits()?);
+            if size as u64 > remaining_bits >> 3 {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Full packet message {message_type} exceeds packet bounds")));
+            }
+
+            let wants_usercmd = message_type == SvcMessages::SvcUserCmds as u32 && self.event_manager.has_listeners::<usercmd::UserCommandsEvent>();
+            if wants_usercmd {
+                let buf = self.read_slice_from_demo_packet(&data, &mut r, size)?;
+                self.handle_user_commands(buf, true)?;
+            } else {
+                r.seek_bits(std::io::SeekFrom::Current((size as i64) << 3))?;
+            }
+        }
+
+        Ok(())
+    }
 
     #[cold]
     fn handle_demo_file_header(
@@ -496,7 +555,7 @@ impl<T: std::io::BufRead + Send + Sync> CsDemoParser<T> {
         handle_command!(
             (EDemoCommands::DemPacket, handle_demo_packet),
             (EDemoCommands::DemSignonPacket, handle_demo_packet),
-            // (EDemoCommands::DemFullPacket, handle_demo_full_packet),
+            (EDemoCommands::DemFullPacket, handle_demo_full_packet),
             (EDemoCommands::DemFileHeader, handle_demo_file_header),
             (EDemoCommands::DemSendTables, handle_demo_send_tables),
             (EDemoCommands::DemClassInfo, handle_demo_class_info),

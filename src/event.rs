@@ -119,6 +119,13 @@ impl EventManager {
         dispatcher.add_listener(listener)
     }
 
+    pub(crate) fn has_listeners<E: Event>(&self) -> bool {
+        self.event_listeners
+            .get(&TypeId::of::<E>())
+            .and_then(|listeners| listeners.downcast_ref::<EventDispatcher<E>>())
+            .is_some_and(|dispatcher| !dispatcher.listeners.is_empty())
+    }
+
     pub fn remove_listener<E: Event>(&mut self, listener_id: u32) -> bool {
         let type_id = TypeId::of::<E>();
 
