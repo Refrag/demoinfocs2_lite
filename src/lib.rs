@@ -321,6 +321,7 @@ impl<T: std::io::BufRead + Send + Sync> CsDemoParser<T> {
             };
 
 
+            // User commands are high-volume, so reconstruction is listener-driven.
             let wants_usercmd = message_type == SvcMessages::SvcUserCmds as u32 && self.event_manager.has_listeners::<usercmd::UserCommandsEvent>();
             if wants_usercmd {
                 #[cfg(not(feature = "handle_packet"))]
@@ -379,6 +380,7 @@ impl<T: std::io::BufRead + Send + Sync> CsDemoParser<T> {
         let packet = self.parse_demo_message::<protobuf::CsvcMsgUserCommands>(buf, false)?;
         let mut commands = Vec::with_capacity(packet.commands.len());
 
+        // Checkpoints seed baselines but must not replay application input.
         for command in &packet.commands {
             match self.usercmd_reconstructor.reconstruct(command) {
                 Ok(command) if !is_checkpoint => commands.push(command),
@@ -404,6 +406,7 @@ impl<T: std::io::BufRead + Send + Sync> CsDemoParser<T> {
     fn handle_demo_full_packet(&mut self, msg: protobuf::CDemoFullPacket) -> Result<(), std::io::Error> {
         let Some(data) = msg.packet.and_then(|packet| packet.data) else { return Ok(()); };
 
+        // Full packets are snapshots; replaying unrelated messages would duplicate state.
         let total_bits = (data.len() << 3) as u64;
         let mut r = BitReader::endian(Cursor::new(&data), bitstream_io::LittleEndian);
 

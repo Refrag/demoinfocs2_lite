@@ -119,6 +119,7 @@ impl EventManager {
         dispatcher.add_listener(listener)
     }
 
+    // Expensive optional decoders use listener presence as their opt-in switch.
     pub(crate) fn has_listeners<E: Event>(&self) -> bool {
         self.event_listeners
             .get(&TypeId::of::<E>())
