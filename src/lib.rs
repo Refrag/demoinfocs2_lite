@@ -382,11 +382,18 @@ impl<T: std::io::BufRead + Send + Sync> CsDemoParser<T> {
 
         // Checkpoints seed baselines but must not replay application input.
         for command in &packet.commands {
+            // GOTV full packets can contain usercmds from ahead of the delayed
+            // ordinary stream. Only seed or resynchronize the same command.
+            if is_checkpoint && !self.usercmd_reconstructor.can_apply_checkpoint(command) {
+                debug!("[tick {}] ignored out-of-sequence full-packet usercmd: slot={:?} command={:?}", self.state.tick, command.player_slot, command.cmd_number);
+                continue;
+            }
+
             match self.usercmd_reconstructor.reconstruct(command) {
                 Ok(command) if !is_checkpoint => commands.push(command),
                 Ok(_) => {}
                 Err(error) if error.is_missing_baseline() => debug!("[tick {}] usercmd has no baseline: {error}", self.state.tick),
-                Err(error @ usercmd::UserCmdReconstructionError::StaleCommand { .. }) if is_checkpoint => debug!("[tick {}] ignored stale full-packet usercmd: {error}", self.state.tick),
+                Err(error @ usercmd::UserCmdReconstructionError::StaleCommand { .. }) => debug!("[tick {}] ignored stale usercmd: {error}", self.state.tick),
                 Err(error) => {
                     if matches!(error, usercmd::UserCmdReconstructionError::InvalidDelta { .. }) {
                         self.usercmd_diagnostics.invalid_delta_count += 1;
@@ -566,5 +573,85 @@ impl<T: std::io::BufRead + Send + Sync> CsDemoParser<T> {
         );
 
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+    use std::sync::{Arc, Mutex};
+
+    use prost::Message;
+
+    use super::*;
+
+    #[test]
+    fn future_full_packet_command_does_not_replace_baseline() {
+        let mut demo = b"PBDEMS2\0".to_vec();
+        demo.resize(16, 0);
+        let mut parser = CsDemoParser::new(Cursor::new(demo)).unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let listener_events = Arc::clone(&events);
+        parser.event_manager.register_listener::<_, usercmd::UserCommandsEvent>(
+            move |event: &usercmd::UserCommandsEvent, _: &CsDemoParserState| {
+                listener_events.lock().unwrap().push(event.clone());
+                Ok(())
+            },
+        );
+
+        for (command_number, forwardmove) in [(10, 1.0), (20, 2.0)] {
+            let full_command = protobuf::CsgoUserCmdPb {
+                base: Some(protobuf::CBaseUserCmdPb {
+                    forwardmove: Some(forwardmove),
+                    ..Default::default()
+                }),
+                attack1_start_history_index: Some(3),
+                ..Default::default()
+            };
+            let checkpoint = protobuf::CsvcMsgUserCommands {
+                commands: vec![protobuf::CMsgServerUserCmd {
+                    player_slot: Some(1),
+                    cmd_number: Some(command_number),
+                    data: Some(full_command.encode_to_vec().into()),
+                    ..Default::default()
+                }],
+            };
+            parser
+                .handle_user_commands(checkpoint.encode_to_vec().into(), true)
+                .unwrap();
+        }
+        assert!(events.lock().unwrap().is_empty());
+
+        let ordinary = protobuf::CsvcMsgUserCommands {
+            commands: vec![protobuf::CMsgServerUserCmd {
+                player_slot: Some(1),
+                cmd_number: Some(11),
+                delta_data: Some(vec![0x30, 0x00].into()),
+                ..Default::default()
+            }],
+        };
+        parser
+            .handle_user_commands(ordinary.encode_to_vec().into(), false)
+            .unwrap();
+
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].commands.len(), 1);
+        assert_eq!(events[0].commands[0].command_number, 11);
+        assert_eq!(
+            events[0].commands[0]
+                .command
+                .base
+                .as_ref()
+                .unwrap()
+                .forwardmove,
+            Some(1.0)
+        );
+        assert_eq!(
+            events[0].commands[0]
+                .command
+                .attack1_start_history_index,
+            Some(0)
+        );
     }
 }

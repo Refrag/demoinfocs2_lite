@@ -538,6 +538,12 @@ pub(crate) struct UserCmdReconstructor {
 }
 
 impl UserCmdReconstructor {
+    pub(crate) fn can_apply_checkpoint(&self, envelope: &CMsgServerUserCmd) -> bool {
+        let (Some(player_slot), Some(command_number)) = (envelope.player_slot, envelope.cmd_number) else { return true; };
+
+        self.baselines.get(&player_slot).map_or(true, |baseline| baseline.command_number == command_number)
+    }
+
     pub(crate) fn reconstruct(&mut self, envelope: &CMsgServerUserCmd) -> Result<ReconstructedUserCmd, UserCmdReconstructionError> {
         let player_slot = envelope.player_slot.ok_or(UserCmdReconstructionError::MissingPlayerSlot)?;
         if player_slot < 0 {
