@@ -135,6 +135,7 @@
 		{ m_Name = "AnimationAlgorithm_t"                   m_VarType = "NET_DATA_TYPE_UINT64" }, // uint8
 		{ m_Name = "ResourceId_t"                           m_VarType = "NET_DATA_TYPE_UINT64" },
 		{ m_Name = "EHudPanelClassStatus_t"                 m_VarType = "NET_DATA_TYPE_INT64" }, // uint32 but Undefined = -1, so must be signed
+		{ m_Name = "CustomCameraMode_t"                     m_VarType = "NET_DATA_TYPE_UINT64" }, // uint8, min is zero
 		{ m_Name = "CUtlBinaryBlock"                        m_VarType = "NET_DATA_TYPE_BINARY_BLOCK" },
 		{ m_Name = "VectorWS"								m_VarType = "NET_DATA_TYPE_FLOAT32"		m_nComponents="3" },
 

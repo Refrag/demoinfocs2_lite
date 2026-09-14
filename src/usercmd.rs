@@ -1,11 +1,23 @@
-// based on https://github.com/unicbm/demoparser/blob/aad2e50d16ffc21557e6780dffeb60face300f9b/src/parser/src/second_pass/usercmd_delta.rs
+// Based on https://github.com/unicbm/demoparser/blob/aad2e50d16ffc21557e6780dffeb60face300f9b/src/parser/src/second_pass/usercmd_delta.rs
 //! Stateful decoding for `CMsgServerUserCmd`.
+//!
+//! High-level flow:
+//!
+//! 1. A full `data` payload decodes directly and establishes the baseline for
+//!    one player slot.
+//! 2. A `delta_data` payload starts from that baseline. Valve reset markers are
+//!    rewritten as standard protobuf, while repeated fields are interpreted as
+//!    indexed list edits.
+//! 3. The resulting patch is merged into a clone of the baseline. Only a fully
+//!    decoded command is committed as the next baseline.
+//! 4. Ordinary packets emit the reconstructed command. Full-packet checkpoints
+//!    only seed or resynchronize the baseline, avoiding duplicate input events.
 //!
 //! Singular fields retain protobuf wire encoding except for wire type 7,
 //! which resets a field to its declared default. The repeated input-history
 //! and subtick fields use the replacement-list encoding observed in current
-//! CS2 demos. Unknown or malformed operations fail the whole delta so callers
-//! can keep the previous per-player baseline unchanged.
+//! CS2 demos. A failed advancing command invalidates its player-slot baseline
+//! until a full payload restores it.
 
 use std::fmt;
 
@@ -323,6 +335,7 @@ fn sanitize_message(mut bytes: &[u8], schema: MessageSchema) -> Option<Vec<u8>> 
 fn decode_repeated<M>(baseline: &[M], payloads: &[prost::bytes::Bytes], schema: MessageSchema) -> Option<Vec<M>> where
     M: Message + Default + Clone,
 {
+    // Matches the default `untrusted_delta_max` in valveextensions.proto.
     const MAX_DELTA_ENTRIES: usize = 256;
 
     let mut messages = baseline.to_vec();
@@ -331,6 +344,7 @@ fn decode_repeated<M>(baseline: &[M], payloads: &[prost::bytes::Bytes], schema: 
         if bytes.is_empty() { messages.clear(); continue; }
 
         let mut key = read_varint(&mut bytes)?;
+        // In list context wire type 7 carries the target length, not a field reset.
         if key & 0x07 == 7 {
             let length = usize::try_from(key >> 3).ok()?;
             if length > MAX_DELTA_ENTRIES { return None; }
@@ -346,6 +360,7 @@ fn decode_repeated<M>(baseline: &[M], payloads: &[prost::bytes::Bytes], schema: 
             let length = usize::try_from(read_varint(&mut bytes)?).ok()?;
             let (delta, rest) = bytes.split_at_checked(length)?;
             let delta = sanitize_message(delta, schema)?;
+            // An element payload is a patch; merge preserves omitted fields.
             message.merge(delta.as_slice()).ok()?;
             bytes = rest;
             if bytes.is_empty() { break; }
@@ -523,6 +538,12 @@ pub(crate) struct UserCmdReconstructor {
 }
 
 impl UserCmdReconstructor {
+    pub(crate) fn can_apply_checkpoint(&self, envelope: &CMsgServerUserCmd) -> bool {
+        let (Some(player_slot), Some(command_number)) = (envelope.player_slot, envelope.cmd_number) else { return true; };
+
+        self.baselines.get(&player_slot).map_or(true, |baseline| baseline.command_number == command_number)
+    }
+
     pub(crate) fn reconstruct(&mut self, envelope: &CMsgServerUserCmd) -> Result<ReconstructedUserCmd, UserCmdReconstructionError> {
         let player_slot = envelope.player_slot.ok_or(UserCmdReconstructionError::MissingPlayerSlot)?;
         if player_slot < 0 {
