@@ -390,10 +390,10 @@ fn merge_qangle(target: &mut Option<CMsgQAngle>, delta: CMsgQAngle) {
     replace_if_some(&mut target.z, delta.z);
 }
 
-fn apply_delta(baseline: &CsgoUserCmdPb, delta_data: &[u8]) -> Option<CsgoUserCmdPb> {
+// Takes the baseline by value: the caller is done with it, and a command is too big to copy per usercmd.
+fn apply_delta(mut next: CsgoUserCmdPb, delta_data: &[u8]) -> Option<CsgoUserCmdPb> {
     let sanitized = sanitize_message(delta_data, MessageSchema::CsgoUserCmd)?;
     let delta = DeltaCsgoUserCmdPb::decode(sanitized.as_slice()).ok()?;
-    let mut next = baseline.clone();
 
     if !delta.input_history_delta.is_empty() {
         next.input_history = decode_repeated(
@@ -574,12 +574,13 @@ impl UserCmdReconstructor {
             let kind = if envelope.delta_data.is_some() { UserCmdPayloadKind::FullAndDelta } else { UserCmdPayloadKind::Full };
             (command, kind)
         } else {
-            let baseline = self.baselines.get(&player_slot).ok_or(UserCmdReconstructionError::MissingBaseline { player_slot, command_number })?;
-            (baseline.command.clone(), UserCmdPayloadKind::Delta)
+            // Taken out rather than copied: every path below stores a new baseline or drops this one.
+            let baseline = self.baselines.remove(&player_slot).ok_or(UserCmdReconstructionError::MissingBaseline { player_slot, command_number })?;
+            (baseline.command, UserCmdPayloadKind::Delta)
         };
 
         if let Some(delta_data) = &envelope.delta_data {
-            command = match apply_delta(&command, delta_data) {
+            command = match apply_delta(command, delta_data) {
                 Some(command) => command,
                 None => {
                     self.baselines.remove(&player_slot);
@@ -630,7 +631,7 @@ mod tests {
             ..Default::default()
         };
 
-        let command = apply_delta(&baseline, &bytes).unwrap();
+        let command = apply_delta(baseline.clone(), &bytes).unwrap();
         let base = command.base.unwrap();
         let buttons = base.buttons_pb.unwrap();
         assert_eq!(buttons.buttonstate1, Some(0x410));
@@ -662,7 +663,7 @@ mod tests {
             0x08, 0x43, 0x05, 0x3f,
         ];
 
-        let command = apply_delta(&CsgoUserCmdPb::default(), &delta).unwrap();
+        let command = apply_delta(CsgoUserCmdPb::default(), &delta).unwrap();
         let base = command.base.unwrap();
         assert_eq!(base.client_tick, Some(70_104));
         assert_eq!(base.random_seed, Some(617_911_688));
@@ -788,7 +789,7 @@ mod tests {
             ..Default::default()
         };
 
-        let command = apply_delta(&baseline, &[0x37, 0x0a, 0x01, 0x77]).unwrap();
+        let command = apply_delta(baseline, &[0x37, 0x0a, 0x01, 0x77]).unwrap();
         assert_eq!(command.attack1_start_history_index, Some(-1));
         assert_eq!(command.base.unwrap().pawn_entity_handle, Some(0x00ff_ffff));
     }
