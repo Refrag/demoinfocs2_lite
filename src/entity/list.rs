@@ -1,4 +1,8 @@
-use std::{any::Any, sync::Arc};
+use std::{
+    any::{Any, TypeId},
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use crate::entity::serializer::{EntityClassSerializer, EntityField};
 
@@ -29,6 +33,9 @@ impl EntityItem {
 /// as the original CConcreteEntityList does the same thing
 pub struct EntityList {
     entity_chunk: [Option<Box<EntityChunk>>; MAX_ENTITY_LISTS],
+    /// indices of live entities by concrete type, so `iter_entity` visits only its own type
+    /// instead of every slot; ordered, so it yields in the same index order a full scan does
+    by_type: BTreeMap<TypeId, BTreeSet<u32>>,
 }
 
 struct EntityChunk {
@@ -42,6 +49,7 @@ impl EntityList {
         const {
             Self {
                 entity_chunk: [const { None }; MAX_ENTITY_LISTS],
+                by_type: BTreeMap::new(),
             }
         }
     }
@@ -96,6 +104,7 @@ impl EntityList {
         if chunk.counter == 0 {
             self.entity_chunk[idx >> ENTITY_CHUNK_SHIFT] = None;
         }
+        self.unindex(idx, &entity);
 
         Some(entity)
     }
@@ -127,7 +136,21 @@ impl EntityList {
         if old_entity.is_none() {
             chunk.counter += 1;
         }
-        old_entity.replace(entity)
+        let type_id = (*entity.item).type_id();
+        let old_entity = old_entity.replace(entity);
+
+        if let Some(old_entity) = &old_entity {
+            self.unindex(idx, old_entity);
+        }
+        self.by_type.entry(type_id).or_default().insert(idx as u32);
+
+        old_entity
+    }
+
+    fn unindex(&mut self, idx: usize, entity: &EntityItem) {
+        if let Some(indices) = self.by_type.get_mut(&(*entity.item).type_id()) {
+            indices.remove(&(idx as u32));
+        }
     }
 
     pub fn get_entity_by_index<T: EntityField>(&self, index: u32) -> Option<&T> {
@@ -164,7 +187,19 @@ impl EntityList {
     }
 
     pub fn iter_entity<T: EntityField>(&self) -> impl Iterator<Item = (&EntityItem, &T)> {
-        self.iter()
+        let indices = self.by_type.get(&TypeId::of::<T>());
+        debug_assert!(
+            indices.into_iter().flatten().copied().eq(self
+                .iter()
+                .filter(|item| item.item.is::<T>())
+                .map(|item| item.index)),
+            "type index out of step with the entity list"
+        );
+
+        indices
+            .into_iter()
+            .flatten()
+            .filter_map(|&idx| self.get(idx as usize))
             .filter_map(|item| item.item.downcast_ref::<T>().map(|e| (item, e)))
     }
 }
