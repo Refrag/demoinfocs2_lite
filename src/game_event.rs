@@ -31,7 +31,7 @@ impl<T: std::io::BufRead + Send + Sync> CsDemoParser<T> {
 
     pub(super) fn handle_legacy_game_event(
         &mut self,
-        msg: protobuf::CMsgSource1LegacyGameEvent,
+        msg: derive::LegacyGameEvent,
     ) -> Result<(), std::io::Error> {
         let Some(event_id) = msg.eventid else {
             error!("Missing event ID in legacy game event");

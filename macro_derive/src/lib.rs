@@ -111,7 +111,7 @@ pub fn game_event_derive(input: TokenStream) -> TokenStream {
         } else if ident == "f32" {
             quote! {val_float}
         } else if ident == "String" {
-            quote! {val_string.take().map(|v| v.to_string())}
+            quote! {val_string.take().map(|v| String::from_utf8_lossy(&v).into_owned())}
         } else {
             panic!(
                 "Unsupported field type: {} for field: {} in GameEvent",
