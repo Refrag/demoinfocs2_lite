@@ -73,6 +73,7 @@ pub fn get_serializer(
 
             match encoder {
                 Some("fixed64") => type_warp!(U64SerializerFixed),
+                Some("fixed8") => type_warp!(U64SerializerFixed8),
                 None => type_warp!(U64SerializerVarInt),
                 Some(t) => {
                     return Err(std::io::Error::new(
@@ -97,6 +98,7 @@ pub fn get_serializer(
 
             match encoder {
                 None => serializer_derivation(I64SerializerVarInt, field_type),
+                Some("fixed8") => serializer_derivation(I64SerializerFixed8, field_type),
                 Some(t) => {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
@@ -401,10 +403,24 @@ primitive_serializer!(
 );
 
 primitive_serializer!(
+    U64SerializerFixed8,
+    u64,
+    |reader: &mut Reader<'_>| { reader.read_u8().map(u64::from) },
+    |reader: &mut Reader<'_>| { reader.skip(8) }
+);
+
+primitive_serializer!(
     I64SerializerVarInt,
     i64,
     |reader: &mut Reader<'_>| { reader.read_varint_i64() },
     skip_varint
+);
+
+primitive_serializer!(
+    I64SerializerFixed8,
+    i64,
+    |reader: &mut Reader<'_>| { reader.read_u8().map(|byte| i64::from(byte.cast_signed())) },
+    |reader: &mut Reader<'_>| { reader.skip(8) }
 );
 
 primitive_serializer!(
@@ -933,5 +949,47 @@ impl EntitySerializerTyped<f32> for F32SerializerQuantized {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use bitstream_io::BitReader;
+
+    use super::*;
+
+    // One leading bit, the byte 0xFF, then 7 bits holding 0x40: a varint read would run on.
+    #[test]
+    fn fixed8_reads_one_unaligned_byte() {
+        let data = [0xFE, 0x81];
+        let reader = || {
+            let mut reader = BitReader::endian(Cursor::new(&data[..]), bitstream_io::LittleEndian);
+            reader.skip(1).unwrap();
+            reader
+        };
+
+        let mut unsigned = 0u64;
+        let mut r = reader();
+        U64SerializerFixed8
+            .decode_typed(Some(&mut unsigned), &[], &mut r)
+            .unwrap();
+        assert_eq!((unsigned, r.read_unsigned::<7, u8>().unwrap()), (255, 0x40));
+
+        let mut signed = 0i64;
+        let mut r = reader();
+        I64SerializerFixed8
+            .decode_typed(Some(&mut signed), &[], &mut r)
+            .unwrap();
+        assert_eq!((signed, r.read_unsigned::<7, u8>().unwrap()), (-1, 0x40));
+
+        let mut r = reader();
+        U64SerializerFixed8.decode_typed(None, &[], &mut r).unwrap();
+        assert_eq!(r.read_unsigned::<7, u8>().unwrap(), 0x40);
+
+        let mut r = reader();
+        I64SerializerFixed8.decode_typed(None, &[], &mut r).unwrap();
+        assert_eq!(r.read_unsigned::<7, u8>().unwrap(), 0x40);
     }
 }
